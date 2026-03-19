@@ -22,10 +22,10 @@ from graph_utils import (
 WORK_GDB = r"C:\Users\Imran\Documents\ArcGIS\Projects\MyProject.gdb"
 FULL_ROAD_FC = os.path.join(WORK_GDB, 'Road_Full')
 TRAIN_INCOMPLETE_FC = os.path.join(WORK_GDB, 'Road_Missing_Train')
-# UNSEEN_INCOMPLETE_FC = os.path.join(WORK_GDB, 'Road_Missing_Unseen')
-UNSEEN_INCOMPLETE_FC = os.path.join(WORK_GDB, 'road_network_E_Feature_Erase')
+UNSEEN_INCOMPLETE_FC = os.path.join(WORK_GDB, 'Road_Missing_Unseen')
 
-MODE = 'unseen_side_only'  # 'training_side_only' | 'unseen_side_only' | 'all'
+
+MODE = 'all'  # 'training_side_only' | 'unseen_side_only' | 'all'
 PREPARE_ROADS = True
 PREPARE_NODES = True
 PREPARE_CANDIDATES = True
