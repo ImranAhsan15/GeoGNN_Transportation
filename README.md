@@ -49,7 +49,7 @@ After editing the registry, rerun `00_prepare_data.py`.
 2. optional `01_make_supervised_examples.py`
 3. `02_export_training.py`
 4. `03_train_model.py`
-5. `04_prepare_unseen.py`
+5. optional `04_prepare_unseen.py`
 6. `05_predict_unseen.py`
 
 ## Outputs
