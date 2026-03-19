@@ -7,6 +7,13 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 try:
+    from scipy.spatial import cKDTree
+    KD_OK = True
+except Exception:
+    cKDTree = None
+    KD_OK = False
+
+try:
     import arcpy
 except Exception:
     arcpy = None
@@ -90,6 +97,60 @@ def make_polyline(p0, p1, spatial_reference):
     return arcpy.Polyline(arr, spatial_reference)
 
 
+def build_kdtree(points):
+    """Return (coords, tree). Tree is None when SciPy is unavailable or points are empty."""
+    coords = np.asarray(points, dtype=np.float32)
+    if not KD_OK or len(coords) == 0:
+        return coords, None
+    try:
+        return coords, cKDTree(coords)
+    except Exception:
+        return coords, None
+
+
+def nearest_neighbor_distance(tree, coords, idx):
+    if tree is not None and len(coords) > 1:
+        try:
+            d, _ = tree.query(coords[idx], k=2)
+            return float(d[1]) if np.ndim(d) > 0 and len(d) > 1 else 0.0
+        except Exception:
+            pass
+    if len(coords) <= 1:
+        return 0.0
+    diff = coords - coords[idx]
+    d = np.hypot(diff[:, 0], diff[:, 1])
+    d[idx] = np.inf
+    return float(np.min(d))
+
+
+def count_points_within_radius(tree, coords, center_xy, radius):
+    radius = float(max(radius, 0.0))
+    if radius <= 0.0:
+        return 0
+    center = np.asarray(center_xy, dtype=np.float32)
+    if tree is not None:
+        try:
+            idxs = tree.query_ball_point(center, r=radius)
+            return int(len(idxs))
+        except Exception:
+            pass
+    if len(coords) == 0:
+        return 0
+    d = np.hypot(coords[:, 0] - center[0], coords[:, 1] - center[1])
+    return int(np.sum(d <= radius))
+
+
+def midpoint_density_value(tree, coords, pt_u, pt_v, gap):
+    """Simple local node density around the candidate midpoint."""
+    mx = (float(pt_u[0]) + float(pt_v[0])) / 2.0
+    my = (float(pt_u[1]) + float(pt_v[1])) / 2.0
+    # Radius grows with the gap, but keep it bounded so density stays local.
+    radius = max(5.0, min(float(gap) * 0.5, 30.0))
+    n = count_points_within_radius(tree, coords, (mx, my), radius)
+    area = math.pi * radius * radius
+    return float(n / max(area, 1e-6))
+
+
 # -------------------------------
 # FC readers / GIS preparation
 # -------------------------------
@@ -148,7 +209,6 @@ def _node_override_map(node_fc, registry: FeatureRegistry):
 
     extra_names = list(registry.extra_node_fields)
     builtins = []
-    # Allow manual overrides for disabled or external versions of existing names too.
     for n in registry.enabled_names('node_features'):
         if n not in ('x', 'y'):
             builtins.append(n)
@@ -215,6 +275,7 @@ def build_graph_from_fc(fc, registry: FeatureRegistry = DEFAULT_REGISTRY, round_
     for _, c in comp.items():
         comp_sizes[c] += 1
 
+    node_coords, node_tree = build_kdtree(idx_to_node)
     node_overrides = _node_override_map(node_fc, registry)
     road_names = registry.all_road_names()
     node_names = registry.all_node_names()
@@ -244,7 +305,7 @@ def build_graph_from_fc(fc, registry: FeatureRegistry = DEFAULT_REGISTRY, round_
             'dominant_angle': float(np.mean(bearings)),
             'local_deadend_ratio': local_deadend_ratio,
             'local_junction_ratio': local_junction_ratio,
-            'nearest_node_dist': 0.0,
+            'nearest_node_dist': nearest_neighbor_distance(node_tree, node_coords, i),
             'elevation': 0.0,
         }
         key_str = str(nk)
@@ -293,6 +354,9 @@ def build_graph_from_fc(fc, registry: FeatureRegistry = DEFAULT_REGISTRY, round_
     return {
         'node_to_idx': node_to_idx,
         'idx_to_node': idx_to_node,
+        'node_coords': node_coords,
+        'node_kdtree': node_tree,
+        'kdtree_ok': bool(node_tree is not None),
         'x': np.asarray(x, dtype=np.float32),
         'node_attr_maps': node_attr_maps,
         'edge_index': np.asarray(edge_index, dtype=np.int64).T if edge_index else np.zeros((2, 0), dtype=np.int64),
@@ -350,7 +414,7 @@ def candidate_features(graph, u, v, registry: FeatureRegistry = DEFAULT_REGISTRY
         'incident_len_std_u': float(np.std(len_u)),
         'incident_len_std_v': float(np.std(len_v)),
         'dominant_angle_diff': pair_ang,
-        'midpoint_density': 0.0,
+        'midpoint_density': midpoint_density_value(graph.get('node_kdtree'), graph.get('node_coords', np.zeros((0, 2))), pt_u, pt_v, gap),
         'detour_ratio_proxy': 0.0,
         'crossing_proxy': 0.0,
         'slope_along_gap': 0.0,
@@ -372,13 +436,34 @@ def generate_candidates(graph, registry: FeatureRegistry = DEFAULT_REGISTRY,
         a, b = rr['u'], rr['v']
         existing.add((min(a, b), max(a, b)))
 
+    coords = graph.get('node_coords')
+    tree = graph.get('node_kdtree')
     cands = []
     feats = []
     metas = []
+
     for u in range(n):
-        for v in range(u + 1, n):
+        if tree is not None:
+            try:
+                neigh = tree.query_ball_point(coords[u], r=float(max_gap))
+                candidate_vs = [int(v) for v in neigh if int(v) > u]
+            except Exception:
+                candidate_vs = range(u + 1, n)
+        else:
+            candidate_vs = range(u + 1, n)
+
+        for v in candidate_vs:
             if (u, v) in existing:
                 continue
+            if different_components_only and graph['comp'].get(u) == graph['comp'].get(v):
+                continue
+
+            # Cheap distance gate first. When KD-tree is used, this mostly confirms the boundary.
+            if coords is not None and len(coords) > 0:
+                gap = float(np.hypot(coords[u, 0] - coords[v, 0], coords[u, 1] - coords[v, 1]))
+                if gap < min_gap or gap > max_gap:
+                    continue
+
             f, m = candidate_features(graph, u, v, registry)
             gap = m['gap_len']
             if gap < min_gap or gap > max_gap:

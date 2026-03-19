@@ -59,3 +59,14 @@ After editing the registry, rerun `00_prepare_data.py`.
 - scored candidate FC
 - predicted missing-edge FC
 - restored network FC
+
+
+## KD-tree upgrade
+This version replaces brute-force all-pairs candidate search with a KD-tree neighbor query inside `graph_utils.py` when SciPy is available.
+
+What changes technically:
+- candidate generation now searches only node pairs within `MAX_GAP`, instead of checking every node pair
+- `nearest_node_dist` is now computed from the node KD-tree
+- `midpoint_density` is now computed from nearby node counts around the candidate midpoint
+
+If SciPy is not available in the Python environment, the code falls back to the previous brute-force behavior automatically.
